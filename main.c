@@ -52,6 +52,16 @@ static bool layer_surface_configured;
 static uint32_t available_width, available_height = 0;
 static void refresh_available_dimension();
 
+struct output {
+    struct wl_output *wl_output;
+    char *name;
+    struct output *next;
+};
+
+static const char *requested_output_name;
+static struct output *outputs;
+static struct wl_output *target_output;
+
 /* drawing */
 static struct drw draw_ctx;
 static struct drwbuf draw_surf_back_buffer, draw_surf_display_buffer, popup_draw_surf_back_buffer, popup_draw_surf_display_buffer;
@@ -145,6 +155,64 @@ static const struct wl_touch_listener touch_listener = {
 static const struct wl_seat_listener seat_listener = {
     .capabilities = seat_handle_capabilities,
     .name = seat_handle_name,
+};
+
+void
+output_geometry(void *data, struct wl_output *wl_output, int32_t x, int32_t y,
+                int32_t physical_width, int32_t physical_height,
+                int32_t subpixel, const char *make, const char *model,
+                int32_t transform)
+{
+}
+
+void
+output_mode(void *data, struct wl_output *wl_output, uint32_t flags,
+            int32_t width, int32_t height, int32_t refresh)
+{
+}
+
+void
+output_done(void *data, struct wl_output *wl_output)
+{
+}
+
+void
+output_scale(void *data, struct wl_output *wl_output, int32_t factor)
+{
+}
+
+void
+output_name(void *data, struct wl_output *wl_output, const char *name)
+{
+    struct output *output = data;
+
+    if (output->name) {
+        free(output->name);
+    }
+
+    output->name = strdup(name);
+    if (!output->name) {
+        die("strdup:");
+    }
+
+    if (requested_output_name && strcmp(output->name, requested_output_name) == 0) {
+        target_output = output->wl_output;
+    }
+}
+
+void
+output_description(void *data, struct wl_output *wl_output,
+                   const char *description)
+{
+}
+
+static const struct wl_output_listener output_listener = {
+    .geometry = output_geometry,
+    .mode = output_mode,
+    .done = output_done,
+    .scale = output_scale,
+    .name = output_name,
+    .description = output_description,
 };
 
 void
@@ -438,6 +506,18 @@ handle_global(void *data, struct wl_registry *registry, uint32_t name,
                       zwp_virtual_keyboard_manager_v1_interface.name) == 0) {
         vkbd_mgr = wl_registry_bind(
             registry, name, &zwp_virtual_keyboard_manager_v1_interface, 1);
+    } else if (strcmp(interface, wl_output_interface.name) == 0) {
+        struct output *output = calloc(1, sizeof(*output));
+
+        if (!output) {
+            die("calloc:");
+        }
+
+        output->wl_output = wl_registry_bind(
+            registry, name, &wl_output_interface, version < 4 ? version : 4);
+        wl_output_add_listener(output->wl_output, &output_listener, output);
+        output->next = outputs;
+        outputs = output;
     }
 }
 
@@ -706,10 +786,8 @@ show()
             wp_viewporter_get_viewport(viewporter, draw_surf.surf);
     }
 
-    struct wl_output *current_output_data = NULL;
-
     layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-        layer_shell, draw_surf.surf, current_output_data, layer, namespace);
+        layer_shell, draw_surf.surf, target_output, layer, namespace);
 
     zwlr_layer_surface_v1_set_size(layer_surface, 0, height);
     zwlr_layer_surface_v1_set_anchor(layer_surface, anchor);
@@ -762,7 +840,7 @@ refresh_available_dimension()
 {
     struct wl_surface *surface = wl_compositor_create_surface(compositor);
     struct zwlr_layer_surface_v1 *layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-        layer_shell, surface, NULL, layer, namespace);
+        layer_shell, surface, target_output, layer, namespace);
     zwlr_layer_surface_v1_set_anchor(layer_surface,
                                      ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
                                      ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
@@ -794,6 +872,8 @@ main(int argc, char **argv)
         normal_height = atoi(tmp);
     if ((tmp = getenv("WVKBD_LANDSCAPE_HEIGHT")))
         landscape_height = atoi(tmp);
+    if ((tmp = getenv("WVKBD_OUTPUT")))
+        requested_output_name = tmp;
 
     /* keyboard settings */
     keyboard.layers = (enum layout_id *)&layers;
@@ -1003,6 +1083,9 @@ main(int argc, char **argv)
 
     // A second round-trip to receive wl_outputs events
     wl_display_roundtrip(display);
+    if (requested_output_name && !target_output) {
+        fprintf(stderr, "wvkbd: output '%s' not found, using compositor default\n", requested_output_name);
+    }
 
     empty_region = wl_compositor_create_region(compositor);
     popup_xdg_positioner = xdg_wm_base_create_positioner(wm_base);
